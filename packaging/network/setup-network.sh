@@ -1,23 +1,18 @@
 #!/bin/bash
 # Set up the Lasso catch-all network (lasso0) for one user. Run as root. Idempotent.
 #
-#   setup-network.sh --user NAME [--deny-unit UNIT]...
-#
-# --deny-unit adds a drop rule for a running user unit (for example syncthing.service).
-# Those rules only last until the unit restarts or the machine reboots; see README.md.
+#   setup-network.sh --user NAME
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 user=""
-units=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--user) user=$2; shift 2 ;;
-	--deny-unit) units+=("$2"); shift 2 ;;
-	*) echo "usage: $0 --user NAME [--deny-unit UNIT]..." >&2; exit 2 ;;
+	*) echo "usage: $0 --user NAME" >&2; exit 2 ;;
 	esac
 done
-[ -n "$user" ] || { echo "usage: $0 --user NAME [--deny-unit UNIT]..." >&2; exit 2; }
+[ -n "$user" ] || { echo "usage: $0 --user NAME" >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 uid=$(id -u "$user")
 
@@ -63,20 +58,5 @@ else
 	nmcli connection add type tun con-name lasso0 "${settings[@]}"
 fi
 nmcli connection up lasso0 || echo "warning: lasso0 did not come up yet; it will autoconnect" >&2
-
-# Per-unit drop rules. `socket cgroupv2` resolves the cgroup path when the rule is added,
-# so each unit must be running now; missing units are skipped with a warning.
-nft flush chain inet lasso deny_units
-for unit in "${units[@]}"; do
-	cg=$(systemctl --user --machine="$user@" show -P ControlGroup "$unit" 2>/dev/null || true)
-	cg=${cg#/}
-	if [ -z "$cg" ] || [ ! -d "/sys/fs/cgroup/$cg" ]; then
-		echo "warning: $unit is not running, no rule added" >&2
-		continue
-	fi
-	level=$(awk -F/ '{print NF}' <<<"$cg")
-	nft add rule inet lasso deny_units socket cgroupv2 level "$level" "\"$cg\"" drop
-	echo "deny rule added for $unit ($cg)"
-done
 
 echo "lasso0 ready for $user (uid $uid)"

@@ -72,6 +72,9 @@ class Packet:
     dport: int | None = None
     icmp_type: int | None = None
     dns_name: str | None = None  # set for UDP to port 53 when the question parses
+    tcp_seq: int | None = None
+    tcp_flags: int | None = None
+    tcp_data_len: int = 0
 
 
 def parse(data: bytes) -> Packet | None:
@@ -123,6 +126,10 @@ def _parse(data: bytes) -> Packet | None:
     pkt = Packet(proto, src, dst)
     if proto in (TCP, UDP) and len(payload) >= 4:
         pkt.sport, pkt.dport = struct.unpack_from("!HH", payload)
+        if proto == TCP and len(payload) >= 20:
+            pkt.tcp_seq = struct.unpack_from("!I", payload, 4)[0]
+            pkt.tcp_flags = payload[13]
+            pkt.tcp_data_len = max(0, len(payload) - (payload[12] >> 4) * 4)
         if proto == UDP and pkt.dport == 53:
             pkt.dns_name = parse_dns_question(payload[8:])
     elif proto in (ICMP, ICMPV6) and payload:
@@ -193,7 +200,8 @@ def demand_reason(pkt: Packet, deny_names: tuple[str, ...] = ()) -> str | None:
             return f"dns:{name}"
         return f"udp:{_hostport(pkt.dst, pkt.dport)}"
     if pkt.proto == TCP:
-        if pkt.dport is None:
+        # TCP DNS is resolved's fallback after a UDP query that was already classified.
+        if pkt.dport is None or pkt.dport == 53:
             return None
         return f"tcp:{_hostport(pkt.dst, pkt.dport)}"
     if (pkt.proto == ICMP and pkt.icmp_type == 8) or (pkt.proto == ICMPV6 and pkt.icmp_type == 128):
@@ -208,3 +216,45 @@ def _hostport(addr: IPAddress, port: int) -> str:
 
 def normalize_names(names: list[str]) -> tuple[str, ...]:
     return tuple(n.strip().strip(".").lower() for n in names if n.strip().strip("."))
+
+
+# Rejection replies for IPv6 packets (the ::/0 route into lasso0 would otherwise hang them)
+
+MIN_MTU = 1280
+_RST_ACK = 0x14
+
+
+def _checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def _ipv6_reply(src: IPAddress, dst: IPAddress, next_header: int, body: bytes, csum_at: int) -> bytes:
+    pseudo = src.packed + dst.packed + struct.pack("!I3xB", len(body), next_header)
+    csum = struct.pack("!H", _checksum(pseudo + body))
+    body = body[:csum_at] + csum + body[csum_at + 2 :]
+    header = struct.pack("!IHBB", 6 << 28, len(body), next_header, 64)
+    return header + src.packed + dst.packed + body
+
+
+def reject_reply(pkt: Packet, data: bytes) -> bytes | None:
+    """An IPv6 packet that tells the sender of data to give up, or None if no reply is allowed.
+
+    TCP SYN gets RST+ACK, anything else an ICMPv6 destination unreachable (port unreachable for
+    TCP and UDP, no route otherwise). Never answers ICMPv6 errors, multicast destinations, or
+    unspecified/multicast sources."""
+    if pkt.dst.version != 6 or pkt.dst.is_multicast or pkt.src.is_unspecified or pkt.src.is_multicast:
+        return None
+    if pkt.proto == ICMPV6 and (pkt.icmp_type is None or pkt.icmp_type < 128):
+        return None
+    if pkt.proto == TCP and pkt.tcp_flags is not None and pkt.tcp_flags & 0x12 == 0x02:
+        ack = (pkt.tcp_seq + 1 + pkt.tcp_data_len) & 0xFFFFFFFF
+        tcp = struct.pack("!HHIIBBHHH", pkt.dport, pkt.sport, 0, ack, 5 << 4, _RST_ACK, 0, 0, 0)
+        return _ipv6_reply(pkt.dst, pkt.src, TCP, tcp, 16)
+    code = 4 if pkt.proto in (TCP, UDP) else 0
+    body = struct.pack("!BBHI", 1, code, 0, 0) + data[: MIN_MTU - 48]
+    return _ipv6_reply(pkt.dst, pkt.src, ICMPV6, body, 2)

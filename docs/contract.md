@@ -81,6 +81,8 @@ class DemandWatcher:
         "dns:example.com" or "tcp:93.184.216.34:443". Never raises because of malformed packets."""
 ```
 
+`deny_units` is enforced by the watcher via /proc attribution of the packet's source socket to a cgroup path component; an unknown owner counts as demand.
+
 The daemon owns the gating (offline, no known Wi-Fi, user active, no manual disconnect, backoff). The watcher only reports demand. If the TUN device does not exist, `run` logs one warning and returns, and the daemon then works without auto-connect.
 
 Catch-all network: TUN `lasso0`, owned by the user, address `10.211.0.2/30` with peer and fake DNS server `10.211.0.1`, default route metric `30000`. IPv6: `fd6c:6173:736f::2/64` with a `::/0` route at metric `30000`.
