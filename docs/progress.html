@@ -106,10 +106,10 @@
 <body>
 <main>
   <h1>Lasso: implementation progress</h1>
-  <p class="meta"><span>Updated 27 Oct 2026</span><span>Code baseline <a href="https://github.com/OliverMarcusson/Lasso/commit/68c269e"><code>68c269e</code></a></span><span><a href="https://github.com/OliverMarcusson/Lasso">github.com/OliverMarcusson/Lasso</a></span><span><a href="https://marcusson.dev/lasso-hotspot-spec">Spec</a></span></p>
+  <p class="meta"><span>Updated 27 Oct 2026</span><span>Code baseline <a href="https://github.com/OliverMarcusson/Lasso/commit/6863fdb"><code>6863fdb</code></a></span><span><a href="https://github.com/OliverMarcusson/Lasso">github.com/OliverMarcusson/Lasso</a></span><span><a href="https://marcusson.dev/lasso-hotspot-spec">Spec</a></span></p>
 
   <div class="summary" id="summary"></div>
-  <p class="meta">The percentage gives every partial item half credit. Items that need the real phone stay open until verified on the Galaxy S25 Ultra. Current priority: phase 1 workers (laptop core, demand detection, Android app).</p>
+  <p class="meta">The percentage gives every partial item half credit. Items that need the real phone stay open until verified on the Galaxy S25 Ultra. Current priority: on-device spike of the Shizuku hotspot (docs/android-hotspot-spike.md), then hardware end-to-end.</p>
 
   <div class="legend" aria-hidden="true">
     <span><i style="background:var(--done)"></i>Done</span>
@@ -130,6 +130,7 @@
   <section>
     <header><h2>Change log</h2></header>
     <ul class="log">
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>90ac132 fixes the demand review: IPv6 on lasso0 now gets RST/ICMPv6 so it fails fast, deny_units moved from fragile cgroup rules into lassod via /proc, TCP DNS no longer triggers. ffe420c fixes all 14 laptop-core review findings with regression tests (one lifecycle lock plus a generation counter, real inhibitor FD, PSK via passwd-file, overall deadlines); 116 tests pass. Artifex android-gradle profile fixed (bb7612f; the SDK cache path mismatch caused the licence error) and the PC worker disk floor lowered to 20 GB. 6863fdb adds the Shizuku hotspot controller; the app builds and its unit tests pass (job_mvqs52e17bc3d7c5533b). Nothing has run on the phone yet. GPT 6.1 Sol review of the Android app assigned.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>68c269e adds the Android app with a stub hotspot backend: GATT server and advertising in a connectedDevice foreground service, pairing allowlist, session state machine, UDP heartbeat, notifications, minimal UI and JVM tests (AGP 9.4.1, Gradle 9.8.2). Not compiled yet: no SDK on the laptop, so the Artifex build profile is still being set up. Repository published at github.com/OliverMarcusson/Lasso. Opus-medium Shizuku hotspot backend assigned.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>49ecbd5 lands the laptop side: lassod daemon (BLE client, NetworkManager join, notifications, UDP heartbeat, sleep inhibitor, control socket, CLI) plus the demand watcher and packaging. 85 unit tests pass with Bluetooth, nmcli, D-Bus and notifications faked; nothing tried on hardware. Additive contract changes: Config.phone_name and an optional address on the pair request. GPT 6.1 Sol review of the laptop core assigned.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>Laptop packaging written: lassod systemd user unit tied to the graphical session, with light hardening that keeps /dev/net/tun and D-Bus reachable, and an idempotent install.sh with --uninstall. Static checks pass; nothing enabled on the laptop.</span></li>
@@ -146,7 +147,7 @@ const SECTIONS = [
   { id: "hotspot", title: "3. Phone hotspot backend", items: [
     ["Spike: Shizuku starts a tethered hotspot with internet on One UI 9", "todo", "Needs the phone. Custom SSID/passphrase and clean stop must also be confirmed."],
     ["Spike: Samsung Routines fallback", "todo", "Needs the phone. Optional stopgap."],
-    ["HotspotController (Shizuku implementation)", "todo", "Stub in place; real Shizuku implementation in progress (Opus medium)."],
+    ["HotspotController (Shizuku implementation)", "partial", "6863fdb: startTethering via ITetheringConnector as shell, save/restore of the user soft AP config, cmd wifi fallback. Builds; not run on the phone."],
     ["Shizuku not running: NO_PRIVILEGE + notification", "partial", "Implemented in 68c269e; not compiled yet."],
   ]},
   { id: "pairing", title: "5. Pairing", items: [
@@ -171,17 +172,17 @@ const SECTIONS = [
   ]},
   { id: "auto", title: "7. Auto-connect on demand", items: [
     ["Gating conditions and backoff", "partial", "Implemented as pure functions with unit tests."],
-    ["lasso0 catch-all TUN network (NetworkManager)", "partial", "packaging/network/setup-network.sh creates it (IPv4 + IPv6 routes at metric 30000). Not applied on the laptop yet."],
+    ["lasso0 catch-all TUN network (NetworkManager)", "partial", "setup-network.sh creates it. IPv6 packets are now rejected with RST/ICMPv6 so they fail fast. Not applied on the laptop yet."],
     ["Demand watcher: packet parsing, DNS names, filters, rate limit", "partial", "Implemented with 15 passing unit tests. Not run against a real TUN yet; under GPT 6.1 Sol review."],
-    ["nftables UID filter", "partial", "UID + resolved filter, notrack and masquerade rules load in a test namespace. deny_units rules break when the unit restarts, so they need re-running after login."],
+    ["nftables UID filter", "partial", "UID filter, resolved UDP/53 exception, notrack and masquerade; loads in a test namespace. deny_units moved into lassod via /proc attribution."],
     ["DNS routing to lasso0 only while offline", "partial", "dns-priority 1000 so NetworkManager keeps ~. only on the best link. Not verified live; VPNs that set ~. still share lookups."],
     ["Spike: first request survives via masquerade", "todo", "Needs a real offline-to-hotspot run."],
   ]},
   { id: "delivery", title: "11. Build, packaging and verification", items: [
-    ["Android build via Artifex profile", "todo", "In progress: android-gradle profile being written and deployed (Sonnet high)."],
+    ["Android build via Artifex profile", "done", "android-gradle@2 (SDK path bug fixed in bb7612f). job_mvqs52e17bc3d7c5533b: assembleDebug + unit tests pass, app-debug.apk."],
     ["Laptop systemd user unit and install", "partial", "packaging/install.sh (uv tool install, enable unit, --uninstall) and a lightly hardened lassod user unit. shellcheck and systemd-analyze clean; not installed yet."],
-    ["Laptop unit tests", "done", "85 passing (core + demand)."],
-    ["Android JVM unit tests", "todo", "Written with the app; run on the remote build."],
+    ["Laptop unit tests", "done", "116 passing (core + demand)."],
+    ["Android JVM unit tests", "done", "Codec, credentials and session machine tests pass on Artifex."],
     ["End-to-end run on the real phone", "todo", "Needs the phone."],
   ]},
 ];
