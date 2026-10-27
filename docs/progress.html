@@ -106,7 +106,7 @@
 <body>
 <main>
   <h1>Lasso: implementation progress</h1>
-  <p class="meta"><span>Updated 27 Oct 2026</span><span>Code baseline <code>a5a4b49</code></span><span><code>~/src/Lasso</code></span><span><a href="https://marcusson.dev/lasso-hotspot-spec">Spec</a></span></p>
+  <p class="meta"><span>Updated 27 Oct 2026</span><span>Code baseline <a href="https://github.com/OliverMarcusson/Lasso/commit/68c269e"><code>68c269e</code></a></span><span><a href="https://github.com/OliverMarcusson/Lasso">github.com/OliverMarcusson/Lasso</a></span><span><a href="https://marcusson.dev/lasso-hotspot-spec">Spec</a></span></p>
 
   <div class="summary" id="summary"></div>
   <p class="meta">The percentage gives every partial item half credit. Items that need the real phone stay open until verified on the Galaxy S25 Ultra. Current priority: phase 1 workers (laptop core, demand detection, Android app).</p>
@@ -130,6 +130,8 @@
   <section>
     <header><h2>Change log</h2></header>
     <ul class="log">
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>68c269e adds the Android app with a stub hotspot backend: GATT server and advertising in a connectedDevice foreground service, pairing allowlist, session state machine, UDP heartbeat, notifications, minimal UI and JVM tests (AGP 9.4.1, Gradle 9.8.2). Not compiled yet: no SDK on the laptop, so the Artifex build profile is still being set up. Repository published at github.com/OliverMarcusson/Lasso. Opus-medium Shizuku hotspot backend assigned.</span></li>
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>49ecbd5 lands the laptop side: lassod daemon (BLE client, NetworkManager join, notifications, UDP heartbeat, sleep inhibitor, control socket, CLI) plus the demand watcher and packaging. 85 unit tests pass with Bluetooth, nmcli, D-Bus and notifications faked; nothing tried on hardware. Additive contract changes: Config.phone_name and an optional address on the pair request. GPT 6.1 Sol review of the laptop core assigned.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>Laptop packaging written: lassod systemd user unit tied to the graphical session, with light hardening that keeps /dev/net/tun and D-Bus reachable, and an idempotent install.sh with --uninstall. Static checks pass; nothing enabled on the laptop.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>All three phase 1 workers were cut off by an account session limit and resumed by hand (Nebula subagent failover is being investigated separately). Demand detection finished: TUN watcher and packet/DNS parser with 15 passing unit tests, plus the catch-all network setup (NetworkManager tun, nftables UID filter, notrack + masquerade, dns-priority routing), validated in a throwaway namespace but not applied. Known gap: on IPv4-only networks, IPv6 attempts hang in lasso0 while online. GPT 6.1 Sol review assigned; Artifex android-gradle profile and systemd packaging started.</span></li>
       <li><time datetime="2026-10-27">27 Oct 2026</time><span>Implementation started. Spec and frozen implementation contract committed as a5a4b49 in ~/src/Lasso. Phase 1 assigned to three parallel workers: laptop daemon core (Sonnet high), demand detection and catch-all network (Opus medium), Android app with stub hotspot backend (Sonnet high). Phone-only spikes wait for the owner.</span></li>
@@ -144,31 +146,31 @@ const SECTIONS = [
   { id: "hotspot", title: "3. Phone hotspot backend", items: [
     ["Spike: Shizuku starts a tethered hotspot with internet on One UI 9", "todo", "Needs the phone. Custom SSID/passphrase and clean stop must also be confirmed."],
     ["Spike: Samsung Routines fallback", "todo", "Needs the phone. Optional stopgap."],
-    ["HotspotController (Shizuku implementation)", "todo", "Interface frozen in the contract. Stub implementation in progress with the Android app."],
-    ["Shizuku not running: NO_PRIVILEGE + notification", "todo", "In progress (Android app worker)."],
+    ["HotspotController (Shizuku implementation)", "todo", "Stub in place; real Shizuku implementation in progress (Opus medium)."],
+    ["Shizuku not running: NO_PRIVILEGE + notification", "partial", "Implemented in 68c269e; not compiled yet."],
   ]},
   { id: "pairing", title: "5. Pairing", items: [
-    ["Laptop: lasso pair / scan, store phone address", "todo", "In progress (laptop core worker)."],
-    ["Phone: pairing window, PAIR allowlist, NOT_PAIRED", "todo", "In progress (Android app worker)."],
-    ["Encrypted + MITM characteristics", "todo", "In progress (Android app worker)."],
+    ["Laptop: lasso pair / scan, store phone address", "partial", "Implemented. BlueZ pair() needs the desktop Bluetooth agent for numeric comparison; untested on hardware."],
+    ["Phone: pairing window, PAIR allowlist, NOT_PAIRED", "partial", "Implemented in 68c269e; not compiled yet."],
+    ["Encrypted + MITM characteristics", "partial", "Implemented in 68c269e; not compiled yet."],
   ]},
   { id: "connect", title: "6. Connect flow", items: [
     ["Wire protocol and constants", "done", "Frozen in docs/contract.md (a5a4b49): UUIDs, messages, 180-byte limit, timeouts."],
-    ["Laptop BLE client: REQUEST, STARTING/READY/ERROR", "todo", "In progress (laptop core worker)."],
-    ["Phone GATT server + advertising in a foreground service", "todo", "In progress (Android app worker)."],
-    ["Per-session random SSID/PSK, max 1 client", "todo", "In progress (Android app worker)."],
-    ["NetworkManager lasso connection (metered, no autoconnect)", "todo", "In progress (laptop core worker)."],
-    ["One notification per attempt, updated in place", "todo", "In progress (laptop core worker)."],
-    ["Existing user hotspot reused with owned=false", "todo", "In progress (Android app worker)."],
+    ["Laptop BLE client: REQUEST, STARTING/READY/ERROR", "partial", "Implemented with fakes in the unit tests; not run against real hardware yet."],
+    ["Phone GATT server + advertising in a foreground service", "partial", "Implemented in 68c269e; not compiled yet."],
+    ["Per-session random SSID/PSK, max 1 client", "partial", "SecureRandom generator with unit tests (unrun). Max 1 client is set by the hotspot backend."],
+    ["NetworkManager lasso connection (metered, no autoconnect)", "partial", "Implemented; wpa3t/wpa2 join as wpa-psk, wpa3 as sae. PSK briefly on nmcli argv (under review)."],
+    ["One notification per attempt, updated in place", "partial", "Implemented with fakes in the unit tests; not run against real hardware yet."],
+    ["Existing user hotspot reused with owned=false", "partial", "Implemented in the session machine; depends on the Shizuku backend."],
   ]},
   { id: "heartbeat", title: "7. Heartbeat and teardown", items: [
-    ["Laptop PING every 30 s, 3 missed PONGs ends session", "todo", "In progress (laptop core worker)."],
-    ["Phone UDP listener + teardown rules (90 s, 180 s, RELEASE, Stop, ENDED)", "todo", "In progress (Android app worker)."],
-    ["Suspend RELEASE, reconnect on resume", "todo", "In progress (laptop core worker)."],
-    ["Switch to known Wi-Fi and RELEASE", "todo", "In progress (laptop core worker)."],
+    ["Laptop PING every 30 s, 3 missed PONGs ends session", "partial", "Implemented; tested over loopback UDP."],
+    ["Phone UDP listener + teardown rules (90 s, 180 s, RELEASE, Stop, ENDED)", "partial", "Implemented; ENDED can be lost if the service is destroyed first."],
+    ["Suspend RELEASE, reconnect on resume", "partial", "Implemented with a logind delay inhibitor (UDP RELEASE only before sleep). D-Bus path untested on hardware."],
+    ["Switch to known Wi-Fi and RELEASE", "partial", "Implemented with fakes in the unit tests; not run against real hardware yet."],
   ]},
   { id: "auto", title: "7. Auto-connect on demand", items: [
-    ["Gating conditions and backoff", "todo", "In progress (laptop core worker)."],
+    ["Gating conditions and backoff", "partial", "Implemented as pure functions with unit tests."],
     ["lasso0 catch-all TUN network (NetworkManager)", "partial", "packaging/network/setup-network.sh creates it (IPv4 + IPv6 routes at metric 30000). Not applied on the laptop yet."],
     ["Demand watcher: packet parsing, DNS names, filters, rate limit", "partial", "Implemented with 15 passing unit tests. Not run against a real TUN yet; under GPT 6.1 Sol review."],
     ["nftables UID filter", "partial", "UID + resolved filter, notrack and masquerade rules load in a test namespace. deny_units rules break when the unit restarts, so they need re-running after login."],
@@ -178,7 +180,7 @@ const SECTIONS = [
   { id: "delivery", title: "11. Build, packaging and verification", items: [
     ["Android build via Artifex profile", "todo", "In progress: android-gradle profile being written and deployed (Sonnet high)."],
     ["Laptop systemd user unit and install", "partial", "packaging/install.sh (uv tool install, enable unit, --uninstall) and a lightly hardened lassod user unit. shellcheck and systemd-analyze clean; not installed yet."],
-    ["Laptop unit tests", "todo", "Written with each component."],
+    ["Laptop unit tests", "done", "85 passing (core + demand)."],
     ["Android JVM unit tests", "todo", "Written with the app; run on the remote build."],
     ["End-to-end run on the real phone", "todo", "Needs the phone."],
   ]},
