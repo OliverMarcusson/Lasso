@@ -1,0 +1,13 @@
+[Unit]
+Description=Lasso catch-all network firewall rules
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /etc/lasso/lasso.nft
+ExecStop=/usr/bin/nft destroy table inet lasso
+
+[Install]
+WantedBy=multi-user.target

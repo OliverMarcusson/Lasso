@@ -1,0 +1,34 @@
+# lassod: Lasso laptop daemon, systemd user service.
+#
+# Installed by packaging/install.sh into ~/.config/systemd/user/.
+# Bound to the graphical session so notify-send gets the session bus and display.
+
+[Unit]
+Description=Lasso laptop daemon (lassod)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/lassod
+Restart=on-failure
+RestartSec=5
+
+# Light hardening. Left out on purpose:
+#   PrivateDevices=, DevicePolicy=   would hide or block /dev/net/tun
+#   PrivateNetwork=                  the daemon needs the host network (tun, Wi-Fi, BlueZ)
+#   ProtectSystem=, ProtectHome=     writable paths unknown; add later if wanted
+#   RestrictAddressFamilies=         not sure which families lassod uses (netlink?)
+# D-Bus (BlueZ, NetworkManager, session bus), the $XDG_RUNTIME_DIR socket and
+# nmcli are unaffected by the options below.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=graphical-session.target

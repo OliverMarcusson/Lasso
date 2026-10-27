@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+# Lasso catch-all network. Installed by setup-network.sh as /etc/lasso/lasso.nft,
+# with @UID@ replaced by the target user's UID.
+
+destroy table inet lasso
+
+table inet lasso {
+	# Packets routed to lasso0 never get a conntrack entry. Otherwise the first SYN of a
+	# connection would pin a "no NAT" binding and its retransmits could not be masqueraded
+	# once the hotspot route wins.
+	chain raw_output {
+		type filter hook output priority raw; policy accept;
+		oifname "lasso0" notrack
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "lasso0" jump to_lasso
+	}
+
+	# Only the user's own traffic and systemd-resolved DNS reach lasso0. Everything else
+	# (timesyncd, NetworkManager connectivity checks, root daemons) is dropped, which makes
+	# the sender fail immediately with EPERM.
+	chain to_lasso {
+		jump deny_units
+		meta skuid @UID@ accept
+		meta skuid "systemd-resolve" meta l4proto { udp, tcp } th dport 53 accept
+		drop
+	}
+
+	# Filled at runtime by setup-network.sh --deny-unit (socket cgroupv2 rules).
+	chain deny_units {
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname != "lasso0" ip saddr 10.211.0.2 masquerade
+		oifname != "lasso0" ip6 saddr fd6c:6173:736f::2 masquerade
+	}
+}

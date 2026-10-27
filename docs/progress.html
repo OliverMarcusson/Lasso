@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lasso – implementation progress</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --surface-2: #f3f2ef;
+    --rule: #e2e1dc;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --text-3: #6f6e69;
+    --done: #184f95;
+    --partial: #3987e5;
+    --todo: #86b6ef;
+    --link: #1c5cab;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19;
+      --surface-2: #242422;
+      --rule: #383835;
+      --text: #f0efec;
+      --text-2: #c3c2b7;
+      --text-3: #9e9d95;
+      --done: #cde2fb;
+      --partial: #5598e7;
+      --todo: #1c5cab;
+      --link: #86b6ef;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--text);
+    font: 15px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 28px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; font-weight: 620; margin: 0; }
+  a { color: var(--link); }
+  .meta { color: var(--text-2); margin: 0 0 28px; }
+  .meta span + span::before { content: "·"; margin: 0 8px; color: var(--text-3); }
+
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .tile { border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; }
+  .tile .n { font-size: 30px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .tile .l { color: var(--text-2); font-size: 13px; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--text-2); font-size: 13px; margin: 0 0 10px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  .controls { display: flex; gap: 0; margin: 0 0 24px; border: 1px solid var(--rule); border-radius: 6px; width: fit-content; overflow: hidden; }
+  .controls label { padding: 6px 14px; font-size: 13px; cursor: pointer; color: var(--text-2); border-right: 1px solid var(--rule); }
+  .controls label:last-child { border-right: 0; }
+  .controls input { position: absolute; opacity: 0; pointer-events: none; }
+  .controls input:checked + span { color: var(--text); font-weight: 600; }
+  .controls label:has(input:checked) { background: var(--surface-2); }
+  .controls label:has(input:focus-visible) { outline: 2px solid var(--partial); outline-offset: -2px; }
+
+  .overview { display: grid; grid-template-columns: minmax(150px, 230px) 1fr 70px; gap: 8px 14px; align-items: center; margin-bottom: 36px; }
+  .overview .name { font-size: 14px; }
+  .overview .name a { color: var(--text); text-decoration: none; }
+  .overview .name a:hover { text-decoration: underline; }
+  .overview .pct { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+  .bar { display: flex; gap: 2px; height: 14px; }
+  .bar span { height: 100%; min-width: 4px; cursor: default; }
+  .bar span:first-child { border-radius: 4px 0 0 4px; }
+  .bar span:last-child { border-radius: 0 4px 4px 0; }
+  .bar span:only-child { border-radius: 4px; }
+  .bar span:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+
+  section { border-top: 1px solid var(--rule); padding: 22px 0 10px; }
+  section header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 4px; }
+  section header .count { color: var(--text-2); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  section > p { color: var(--text-2); margin: 4px 0 12px; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 600; font-size: 12px; color: var(--text-3); padding: 6px 10px 6px 0; border-bottom: 1px solid var(--rule); }
+  td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td.item { width: 34%; }
+  td.status { width: 120px; white-space: nowrap; }
+  td.note { color: var(--text-2); }
+  .st { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+  .st i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  tr[hidden] { display: none; }
+  code { font: 12.5px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
+
+  .log { list-style: none; padding: 0; margin: 8px 0 0; }
+  .log li { padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 14px; display: grid; grid-template-columns: 110px 1fr; gap: 12px; }
+  .log time { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+  #tip { position: fixed; pointer-events: none; background: var(--text); color: var(--surface); font-size: 12.5px; padding: 6px 9px; border-radius: 4px; white-space: nowrap; opacity: 0; transition: opacity 80ms; z-index: 10; }
+  @media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
+  @media (max-width: 640px) {
+    .overview { grid-template-columns: 1fr 56px; }
+    .overview .bar { grid-column: 1 / -1; order: 3; }
+    td.item { width: auto; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lasso: implementation progress</h1>
+  <p class="meta"><span>Updated 27 Oct 2026</span><span>Code baseline <code>a5a4b49</code></span><span><code>~/src/Lasso</code></span><span><a href="https://marcusson.dev/lasso-hotspot-spec">Spec</a></span></p>
+
+  <div class="summary" id="summary"></div>
+  <p class="meta">The percentage gives every partial item half credit. Items that need the real phone stay open until verified on the Galaxy S25 Ultra. Current priority: phase 1 workers (laptop core, demand detection, Android app).</p>
+
+  <div class="legend" aria-hidden="true">
+    <span><i style="background:var(--done)"></i>Done</span>
+    <span><i style="background:var(--partial)"></i>Partial</span>
+    <span><i style="background:var(--todo)"></i>Not started</span>
+  </div>
+  <div class="overview" id="overview" role="list" aria-label="Progress per spec section"></div>
+
+  <div class="controls" role="radiogroup" aria-label="Show items">
+    <label><input type="radio" name="f" value="all" checked><span>All items</span></label>
+    <label><input type="radio" name="f" value="done"><span>Done</span></label>
+    <label><input type="radio" name="f" value="partial"><span>Partial</span></label>
+    <label><input type="radio" name="f" value="todo"><span>Not started</span></label>
+  </div>
+
+  <div id="sections"></div>
+
+  <section>
+    <header><h2>Change log</h2></header>
+    <ul class="log">
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>Laptop packaging written: lassod systemd user unit tied to the graphical session, with light hardening that keeps /dev/net/tun and D-Bus reachable, and an idempotent install.sh with --uninstall. Static checks pass; nothing enabled on the laptop.</span></li>
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>All three phase 1 workers were cut off by an account session limit and resumed by hand (Nebula subagent failover is being investigated separately). Demand detection finished: TUN watcher and packet/DNS parser with 15 passing unit tests, plus the catch-all network setup (NetworkManager tun, nftables UID filter, notrack + masquerade, dns-priority routing), validated in a throwaway namespace but not applied. Known gap: on IPv4-only networks, IPv6 attempts hang in lasso0 while online. GPT 6.1 Sol review assigned; Artifex android-gradle profile and systemd packaging started.</span></li>
+      <li><time datetime="2026-10-27">27 Oct 2026</time><span>Implementation started. Spec and frozen implementation contract committed as a5a4b49 in ~/src/Lasso. Phase 1 assigned to three parallel workers: laptop daemon core (Sonnet high), demand detection and catch-all network (Opus medium), Android app with stub hotspot backend (Sonnet high). Phone-only spikes wait for the owner.</span></li>
+    </ul>
+  </section>
+</main>
+<div id="tip" role="tooltip"></div>
+
+<script>
+// Status: "done" | "partial" | "todo". Update this list as work lands.
+const SECTIONS = [
+  { id: "hotspot", title: "3. Phone hotspot backend", items: [
+    ["Spike: Shizuku starts a tethered hotspot with internet on One UI 9", "todo", "Needs the phone. Custom SSID/passphrase and clean stop must also be confirmed."],
+    ["Spike: Samsung Routines fallback", "todo", "Needs the phone. Optional stopgap."],
+    ["HotspotController (Shizuku implementation)", "todo", "Interface frozen in the contract. Stub implementation in progress with the Android app."],
+    ["Shizuku not running: NO_PRIVILEGE + notification", "todo", "In progress (Android app worker)."],
+  ]},
+  { id: "pairing", title: "5. Pairing", items: [
+    ["Laptop: lasso pair / scan, store phone address", "todo", "In progress (laptop core worker)."],
+    ["Phone: pairing window, PAIR allowlist, NOT_PAIRED", "todo", "In progress (Android app worker)."],
+    ["Encrypted + MITM characteristics", "todo", "In progress (Android app worker)."],
+  ]},
+  { id: "connect", title: "6. Connect flow", items: [
+    ["Wire protocol and constants", "done", "Frozen in docs/contract.md (a5a4b49): UUIDs, messages, 180-byte limit, timeouts."],
+    ["Laptop BLE client: REQUEST, STARTING/READY/ERROR", "todo", "In progress (laptop core worker)."],
+    ["Phone GATT server + advertising in a foreground service", "todo", "In progress (Android app worker)."],
+    ["Per-session random SSID/PSK, max 1 client", "todo", "In progress (Android app worker)."],
+    ["NetworkManager lasso connection (metered, no autoconnect)", "todo", "In progress (laptop core worker)."],
+    ["One notification per attempt, updated in place", "todo", "In progress (laptop core worker)."],
+    ["Existing user hotspot reused with owned=false", "todo", "In progress (Android app worker)."],
+  ]},
+  { id: "heartbeat", title: "7. Heartbeat and teardown", items: [
+    ["Laptop PING every 30 s, 3 missed PONGs ends session", "todo", "In progress (laptop core worker)."],
+    ["Phone UDP listener + teardown rules (90 s, 180 s, RELEASE, Stop, ENDED)", "todo", "In progress (Android app worker)."],
+    ["Suspend RELEASE, reconnect on resume", "todo", "In progress (laptop core worker)."],
+    ["Switch to known Wi-Fi and RELEASE", "todo", "In progress (laptop core worker)."],
+  ]},
+  { id: "auto", title: "7. Auto-connect on demand", items: [
+    ["Gating conditions and backoff", "todo", "In progress (laptop core worker)."],
+    ["lasso0 catch-all TUN network (NetworkManager)", "partial", "packaging/network/setup-network.sh creates it (IPv4 + IPv6 routes at metric 30000). Not applied on the laptop yet."],
+    ["Demand watcher: packet parsing, DNS names, filters, rate limit", "partial", "Implemented with 15 passing unit tests. Not run against a real TUN yet; under GPT 6.1 Sol review."],
+    ["nftables UID filter", "partial", "UID + resolved filter, notrack and masquerade rules load in a test namespace. deny_units rules break when the unit restarts, so they need re-running after login."],
+    ["DNS routing to lasso0 only while offline", "partial", "dns-priority 1000 so NetworkManager keeps ~. only on the best link. Not verified live; VPNs that set ~. still share lookups."],
+    ["Spike: first request survives via masquerade", "todo", "Needs a real offline-to-hotspot run."],
+  ]},
+  { id: "delivery", title: "11. Build, packaging and verification", items: [
+    ["Android build via Artifex profile", "todo", "In progress: android-gradle profile being written and deployed (Sonnet high)."],
+    ["Laptop systemd user unit and install", "partial", "packaging/install.sh (uv tool install, enable unit, --uninstall) and a lightly hardened lassod user unit. shellcheck and systemd-analyze clean; not installed yet."],
+    ["Laptop unit tests", "todo", "Written with each component."],
+    ["Android JVM unit tests", "todo", "Written with the app; run on the remote build."],
+    ["End-to-end run on the real phone", "todo", "Needs the phone."],
+  ]},
+];
+
+const LABEL = { done: "Done", partial: "Partial", todo: "Not started" };
+const ORDER = ["done", "partial", "todo"];
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const counts = items => Object.fromEntries(ORDER.map(s => [s, items.filter(i => i[1] === s).length]));
+// Partial items count half toward the percentage.
+const pct = c => Math.round(100 * (c.done + c.partial / 2) / (c.done + c.partial + c.todo));
+
+const all = SECTIONS.flatMap(s => s.items);
+const total = counts(all);
+document.getElementById("summary").innerHTML = [
+  [pct(total) + "%", "Overall (partial counts half)"],
+  [total.done, "Done"], [total.partial, "Partial"], [total.todo, "Not started"],
+].map(([n, l]) => `<div class="tile"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+
+const bar = c => {
+  const n = c.done + c.partial + c.todo;
+  return `<div class="bar">` + ORDER.filter(s => c[s]).map(s =>
+    `<span tabindex="0" style="flex:${c[s]};background:var(--${s})" data-tip="${LABEL[s]}: ${c[s]} of ${n}" aria-label="${LABEL[s]}: ${c[s]} of ${n}"></span>`
+  ).join("") + `</div>`;
+};
+document.getElementById("overview").innerHTML = SECTIONS.map(s => {
+  const c = counts(s.items);
+  return `<div class="name" role="listitem"><a href="#${s.id}">${esc(s.title)}</a></div>${bar(c)}<div class="pct">${pct(c)}%</div>`;
+}).join("");
+
+document.getElementById("sections").innerHTML = SECTIONS.map(s => {
+  const c = counts(s.items);
+  const rows = s.items.map(([item, st, note]) =>
+    `<tr data-status="${st}"><td class="item">${item}</td><td class="status"><span class="st"><i style="background:var(--${st})"></i>${LABEL[st]}</span></td><td class="note">${note}</td></tr>`
+  ).join("");
+  return `<section id="${s.id}"><header><h2>${esc(s.title)}</h2><span class="count">${c.done} done · ${c.partial} partial · ${c.todo} not started</span></header>
+    <table><thead><tr><th>Spec item</th><th>Status</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+}).join("");
+
+document.querySelectorAll('.controls input').forEach(r => r.addEventListener("change", () => {
+  const f = r.value;
+  document.querySelectorAll("tr[data-status]").forEach(tr => tr.hidden = f !== "all" && tr.dataset.status !== f);
+}));
+
+const tip = document.getElementById("tip");
+const show = (el, x, y) => { tip.textContent = el.dataset.tip; tip.style.left = (x + 12) + "px"; tip.style.top = (y - 34) + "px"; tip.style.opacity = 1; };
+document.querySelectorAll("[data-tip]").forEach(el => {
+  el.addEventListener("mousemove", e => show(el, e.clientX, e.clientY));
+  el.addEventListener("focus", () => { const r = el.getBoundingClientRect(); show(el, r.left, r.top); });
+  ["mouseleave", "blur"].forEach(ev => el.addEventListener(ev, () => tip.style.opacity = 0));
+});
+</script>
+</body>
+</html>
