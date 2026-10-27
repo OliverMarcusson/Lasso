@@ -1,7 +1,6 @@
 """Config dataclass and loader for ~/.config/lasso/config.toml."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import tomllib
@@ -29,15 +28,31 @@ def config_path() -> Path:
 def load(path: Path | None = None) -> Config:
     path = path or config_path()
     try:
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Config()
     known = {f.name for f in fields(Config)}
     return Config(**{k: v for k, v in data.items() if k in known})
 
 
+def toml_string(value: str) -> str:
+    """A TOML basic string: escape backslash, quote and control characters, keep other Unicode as is."""
+    out = []
+    for ch in value:
+        n = ord(ch)
+        if ch in '"\\':
+            out.append("\\" + ch)
+        elif n < 0x20 or n == 0x7F:
+            out.append(f"\\u{n:04X}")
+        elif 0xD800 <= n <= 0xDFFF:  # lone surrogate (possible from JSON), not encodable
+            out.append("\uFFFD")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def _set_key(text: str, key: str, value: str) -> str:
-    line = f"{key} = {json.dumps(value)}"
+    line = f"{key} = {toml_string(value)}"
     pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
     if pattern.search(text):
         return pattern.sub(lambda _: line, text, count=1)
@@ -48,7 +63,7 @@ def _set_key(text: str, key: str, value: str) -> str:
 def save_phone(address: str, name: str, path: Path | None = None) -> None:
     path = path or config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = path.read_text() if path.exists() else ""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     text = _set_key(text, "phone_address", address)
     text = _set_key(text, "phone_name", name)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")

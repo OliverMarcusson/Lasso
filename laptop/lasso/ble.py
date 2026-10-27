@@ -37,9 +37,13 @@ async def _connected(address: str, *, pair_first: bool = False, connect_s: float
 
     client = BleakClient(address, timeout=connect_s)
     try:
-        await client.connect()
+        # bleak may spend its timeout on discovery and then again on connecting: bound the whole thing.
+        async with asyncio.timeout(connect_s):
+            await client.connect()
     except (BleakError, OSError, TimeoutError) as e:
         log.info("BLE connect failed: %s", e)
+        with suppress(Exception):
+            await asyncio.wait_for(client.disconnect(), RELEASE_CONNECT_S)
         raise LassoError("Phone not reachable (Bluetooth)") from e
     try:
         if pair_first:
@@ -62,10 +66,13 @@ async def _send(client: BleakClient, data: bytes) -> None:
 
 
 async def _wait(queue: Queue, wanted: set[str], timeout: float) -> dict:
-    """Next message whose type is in `wanted`. ERROR raises PhoneError, other types are skipped."""
+    """Next message whose type is in `wanted`, within `timeout` overall (TimeoutError otherwise).
+    ERROR raises PhoneError, other types are skipped."""
     deadline = time.monotonic() + timeout
     while True:
-        msg = await asyncio.wait_for(queue.get(), max(deadline - time.monotonic(), 0.01))
+        msg = await asyncio.wait_for(queue.get(), max(deadline - time.monotonic(), 0))
+        if time.monotonic() > deadline:  # queued messages do not wait, so check: a late answer is no answer
+            raise TimeoutError
         if msg["t"] == "ERROR":
             raise PhoneError(str(msg.get("code", "UNKNOWN")))
         if msg["t"] in wanted:

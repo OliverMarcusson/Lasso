@@ -193,6 +193,7 @@ async def test_disconnect_while_joining_cancels_and_releases(rig):
         await task
     assert d.state is State.IDLE
     assert rig.ble.released == [READY.sid]
+    assert rig.nm.calls[-1] == "down"  # deactivates the pending `lasso` activation too
 
 
 async def test_not_paired(rig):
@@ -316,3 +317,164 @@ async def test_handle_commands(rig):
     resp = await d.handle({"cmd": "connect"})
     assert resp == {"ok": False, "error": "Phone not reachable (Bluetooth)"}
     assert d.tracker.manual is False
+
+
+# ---- review regressions: lifecycle serialization ----
+
+from types import SimpleNamespace  # noqa: E402
+
+from dbus_fast import MessageType  # noqa: E402
+
+
+async def _no_inhibit(bus):
+    pass
+
+
+async def test_inhibitor_keeps_the_received_fd_not_the_index(rig, monkeypatch):
+    closed = []
+    monkeypatch.setattr("lasso.daemon.os.close", closed.append)
+    reply = SimpleNamespace(message_type=MessageType.METHOD_RETURN, body=[0], unix_fds=[987])
+    await rig.daemon._take_inhibitor(SimpleNamespace(call=lambda m: _const(reply)))
+    rig.daemon._drop_inhibitor()
+    assert closed == [987]
+    bad = SimpleNamespace(message_type=MessageType.ERROR, error_name="x", body=["no"], unix_fds=[])
+    await rig.daemon._take_inhibitor(SimpleNamespace(call=lambda m: _const(bad)))
+    assert rig.daemon._inhibit_fd is None
+
+
+async def test_stale_network_switch_leaves_newer_session_alone(rig):
+    d = rig.daemon
+    await d.connect()
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def up(name):
+        started.set()
+        await finish.wait()
+        return True
+    rig.nm.up = up
+    switch = asyncio.ensure_future(d._switch_to_known(Observation(known_wifi=["Home"])))
+    await started.wait()
+    await d.disconnect()
+    await d.connect()
+    finish.set()
+    await switch
+    assert d.state is State.ACTIVE and d.session is not None
+    assert len(rig.ble.released) == 1
+    await d.disconnect()
+
+
+async def test_disconnect_cancels_pairing(rig):
+    d = rig.daemon
+    started = asyncio.Event()
+
+    async def pair(*a):
+        started.set()
+        await asyncio.Event().wait()
+    rig.ble.pair = pair
+    task = asyncio.ensure_future(d.handle({"cmd": "pair", "address": "11:22:33:44:55:66"}))
+    await started.wait()
+    assert (await d.handle({"cmd": "connect"}))["ok"] is False   # busy while pairing
+    await d.disconnect()
+    assert (await task) == {"ok": False, "error": "cancelled"}
+    await d.connect()
+    await asyncio.sleep(0.01)
+    assert d.state is State.ACTIVE and d.config.phone_address == "AA:BB:CC:DD:EE:FF"
+    await d.disconnect()
+
+
+async def test_manual_disconnect_beats_pending_resume(rig, monkeypatch):
+    d = rig.daemon
+    monkeypatch.setattr("lasso.daemon.RESUME_DELAY_S", 0.03)
+    await d.connect()
+    await d._on_sleep(True, None)
+    d._take_inhibitor = _no_inhibit
+    task = asyncio.ensure_future(d._on_sleep(False, None))
+    await asyncio.sleep(0)
+    await d.handle({"cmd": "disconnect"})
+    await task
+    assert d.state is State.IDLE and rig.nm.calls.count("join Lasso-ab12cd wpa3t") == 1
+
+
+async def test_connect_and_demand_blocked_while_suspended(rig):
+    d = rig.daemon
+    await d._on_sleep(True, None)
+    with pytest.raises(LassoError, match="suspend"):
+        await d.connect()
+    rig.now[0] += 100
+    await d._demand("x")
+    assert d.state is State.IDLE and rig.nm.calls == ["down"]
+    d._take_inhibitor = _no_inhibit
+    await d._on_sleep(False, None)
+    await d.connect()
+    assert d.state is State.ACTIVE
+    await d.disconnect()
+
+
+async def test_sleep_while_joining_releases_over_ble_within_budget(rig, monkeypatch):
+    monkeypatch.setattr("lasso.daemon.SLEEP_BLE_RELEASE_S", 0.05)
+    d = rig.daemon
+    started = asyncio.Event()
+
+    async def join(*a):
+        started.set()
+        await asyncio.Event().wait()
+    rig.nm.join = join
+    task = asyncio.ensure_future(d.connect())
+    await started.wait()
+    await d._on_sleep(True, None)
+    assert rig.ble.released == [READY.sid] and rig.udp == []
+    assert d.session is None and d.state is State.IDLE
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # A BLE RELEASE that hangs must not hold up the sleep beyond the budget.
+    async def stuck_release(address, sid):
+        await asyncio.sleep(10)
+    rig.ble.release = stuck_release
+    d._take_inhibitor = _no_inhibit
+    await d._on_sleep(False, None)
+    task = asyncio.ensure_future(d.connect())
+    await asyncio.sleep(0.01)
+    await asyncio.wait_for(d._on_sleep(True, None), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _wait_state(d, state):
+    for _ in range(200):
+        if d.state is state:
+            return
+        await asyncio.sleep(0.005)
+
+
+async def test_heartbeat_loss_latches_auto_connect_until_network_change(rig):
+    d = rig.daemon
+    rig.pings.default = False
+    await d._demand("x")
+    rig.now[0] += 25
+    await d._demand("x")
+    await _wait_state(d, State.IDLE)
+    assert d.detail == "heartbeat lost"
+    rig.pings.default = True
+    rig.now[0] += 1000                            # well past any backoff
+    await d._demand("x")
+    await d._demand("x")
+    assert d.state is State.IDLE                  # no automatic retry in v1
+    rig.nm.obs = Observation(connectivity="none", ethernet_up=True)
+    await d.poll_once()                           # ethernet changed: latch off (ethernet itself still blocks)
+    rig.nm.obs = Observation(connectivity="none")
+    rig.now[0] += 25
+    await d._demand("x")
+    assert d.state is State.ACTIVE
+    await d.disconnect()
+
+
+async def test_explicit_connect_clears_heartbeat_latch(rig):
+    d = rig.daemon
+    rig.pings.default = False
+    await d.connect()
+    await _wait_state(d, State.IDLE)
+    rig.pings.default = True
+    assert (await d.handle({"cmd": "connect"}))["state"] == "ACTIVE"
+    assert d._hb_lost is False
+    await d.disconnect()

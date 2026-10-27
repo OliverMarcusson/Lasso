@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 
 from lasso import protocol
 from lasso.protocol import LassoError
@@ -37,16 +40,31 @@ def split_terse(line: str) -> list[str]:
     return fields
 
 
-def profile_settings(ssid: str, psk: str, sec: str) -> list[str]:
-    """Property/value pairs for `nmcli con add|modify`."""
+def profile_settings(ssid: str, sec: str) -> list[str]:
+    """Property/value pairs for `nmcli con modify`. The PSK is never stored: it goes in at `con up`."""
     return [
         "802-11-wireless.ssid", ssid,
         "802-11-wireless-security.key-mgmt", KEY_MGMT[sec],
-        "802-11-wireless-security.psk", psk,
+        "802-11-wireless-security.psk-flags", "2",  # not-saved
         "connection.metered", "yes",
         "connection.autoconnect", "no",
         "connection.autoconnect-priority", "-10",
     ]
+
+
+@contextmanager
+def passwd_file(psk: str) -> Iterator[str]:
+    """A mode-0600 file in $XDG_RUNTIME_DIR for `nmcli con up ... passwd-file`, deleted on exit."""
+    if "\n" in psk or "\r" in psk:
+        raise LassoError("Could not join hotspot: bad passphrase")
+    fd, path = tempfile.mkstemp(prefix="lasso-psk-", dir=os.environ.get("XDG_RUNTIME_DIR"))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(f"802-11-wireless-security.psk:{psk}\n")
+        yield path
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 def parse_ethernet_up(out: str) -> bool:
@@ -74,9 +92,13 @@ class NM:
             "nmcli", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        except TimeoutError:
-            proc.kill()
+        except (TimeoutError, asyncio.CancelledError) as e:
+            # Never leave nmcli behind, whether it timed out or our caller gave up.
+            with suppress(ProcessLookupError):
+                proc.kill()
             await proc.wait()
+            if isinstance(e, asyncio.CancelledError):
+                raise
             return 124, "", "nmcli timed out"
         return proc.returncode or 0, out.decode(), err.decode()
 
@@ -84,13 +106,12 @@ class NM:
         _, out, _ = await self.run("-t", "-f", "NAME", "con", "show")
         return CONN in (split_terse(line)[0] for line in out.splitlines())
 
-    async def _write_profile(self, ssid: str, psk: str, sec: str) -> None:
-        # The PSK is on nmcli's argv for the moment; it is a per-session secret that expires with the session.
+    async def _write_profile(self, ssid: str, sec: str) -> None:
         if not await self._exists():
             rc, _, err = await self.run("con", "add", "type", "wifi", "con-name", CONN, "ifname", "*", "ssid", ssid)
             if rc != 0:
                 raise LassoError(f"Could not create Wi-Fi profile: {err.strip()}")
-        rc, _, err = await self.run("con", "modify", CONN, *profile_settings(ssid, psk, sec))
+        rc, _, err = await self.run("con", "modify", CONN, *profile_settings(ssid, sec))
         if rc != 0:
             raise LassoError(f"Could not configure Wi-Fi profile: {err.strip()}")
 
@@ -100,27 +121,29 @@ class NM:
         return "" if gw in ("", "--") else gw
 
     async def join(self, ssid: str, psk: str, sec: str, timeout: float = protocol.WIFI_JOIN_S) -> str:
-        """Create/update the `lasso` connection, bring it up, return the IPv4 gateway. 30 s overall."""
-        deadline = time.monotonic() + timeout
-        await self._write_profile(ssid, psk, sec)
+        """Create/update the `lasso` connection, bring it up, return the IPv4 gateway. `timeout` is overall;
+        on timeout or cancel any running nmcli is killed (the caller's teardown runs `con down`)."""
         last = "no suitable network found"
-        while True:
-            left = deadline - time.monotonic()
-            if left < 3:
-                raise LassoError(f"Could not join hotspot: {last}")
-            await self.run("dev", "wifi", "rescan", timeout=5)  # the new SSID must be in the scan list
-            rc, _, err = await self.run("-w", str(int(min(left, 15))), "con", "up", CONN, timeout=left + 5)
-            if rc == 0:
-                break
-            last = err.strip() or last
-            await asyncio.sleep(1)
-        while True:
-            gw = await self.gateway()
-            if gw:
+        try:
+            async with asyncio.timeout(timeout) as deadline:
+                await self._write_profile(ssid, sec)
+                loop = asyncio.get_running_loop()
+                while True:
+                    await self.run("dev", "wifi", "rescan", timeout=5)  # the new SSID must be in the scan list
+                    wait = max(1, int(min(deadline.when() - loop.time(), 15)))
+                    with passwd_file(psk) as pw:
+                        rc, _, err = await self.run("-w", str(wait), "con", "up", "id", CONN, "passwd-file", pw,
+                                                    timeout=wait + 5)
+                    if rc == 0:
+                        break
+                    last = err.strip() or last
+                    await asyncio.sleep(1)
+                last = "no gateway from DHCP"
+                while not (gw := await self.gateway()):
+                    await asyncio.sleep(0.5)
                 return gw
-            if time.monotonic() > deadline:
-                raise LassoError("Could not join hotspot: no gateway from DHCP")
-            await asyncio.sleep(0.5)
+        except TimeoutError:
+            raise LassoError(f"Could not join hotspot: {last}") from None
 
     async def down(self) -> None:
         await self.run("con", "down", CONN, timeout=15)
@@ -153,7 +176,7 @@ class NM:
                 continue
             _, props, _ = await self.run("-g", "802-11-wireless.ssid,connection.autoconnect", "con", "show", name,
                                          timeout=10)
-            lines = props.splitlines()
+            lines = [":".join(split_terse(line)) for line in props.splitlines()]  # -g output is escaped too
             if len(lines) >= 2 and lines[0] and lines[1] == "yes":
                 saved[lines[0]] = name
         return saved

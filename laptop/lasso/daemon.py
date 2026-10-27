@@ -33,6 +33,7 @@ POLL_S = 5
 MANUAL_GUARD_S = 5      # ignore a stale "full" right after a manual disconnect
 BACKOFF_STEPS_S = (60, 300, 900)
 RESUME_DELAY_S = 3      # let Bluetooth and Wi-Fi come back before reconnecting
+SLEEP_BLE_RELEASE_S = 3  # BLE RELEASE before sleep must fit logind's delay budget (InhibitDelayMaxSec, 5 s)
 
 
 class State(StrEnum):
@@ -177,9 +178,18 @@ class Daemon:
         self.gateway: str | None = None
         self.tracker = OfflineTracker()
         self.backoff = Backoff()
-        self._connect_task: asyncio.Task | None = None
+        # Lifecycle: connect and pair run as the one `_op` task. Anything that ends a session (disconnect,
+        # sleep, heartbeat loss, network switch) bumps `_gen`, cancels `_op`, then mutates under `_lock`.
+        # Work that awaited outside the lock rechecks `_gen` before touching state.
+        self._lock = asyncio.Lock()
+        self._gen = 0
+        self._op: asyncio.Task | None = None
         self._hb_task: asyncio.Task | None = None
+        self._suspended = False
         self._was_active_before_sleep = False
+        # After heartbeat loss there is no automatic retry (spec 7) until `lasso connect` or a network change.
+        self._hb_lost = False
+        self._hb_lost_net: tuple | None = None
         self._inhibit_fd: int | None = None
         self._tasks: set[asyncio.Task] = set()
 
@@ -197,6 +207,22 @@ class Daemon:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _start_op(self, state: State, detail: str, make: Callable[[int], Awaitable[None]]) -> None:
+        """Start connect or pair as `_op` if nothing else is going on. `make` gets the new generation."""
+        if self._suspended:
+            raise LassoError("suspending or resuming, try again in a moment")
+        if self.state is not State.IDLE or self._lock.locked() or (self._op and not self._op.done()):
+            raise LassoError(f"busy: {self.state}")
+        self._gen += 1
+        self._set(state, detail)
+        self._op = asyncio.ensure_future(make(self._gen))
+
+    async def _cancel_op(self) -> None:
+        task, self._op = self._op, None
+        if task and not task.done():
+            task.cancel()
+            await asyncio.wait([task])
+
     # -- control commands --
 
     async def handle(self, req: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +232,7 @@ class Daemon:
                 pass
             elif cmd == "connect":
                 self.tracker.manual = False  # an explicit connect overrides an earlier manual disconnect
+                self._hb_lost = False
                 await self.connect()
             elif cmd == "disconnect":
                 self.tracker.mark_manual(self.clock())
@@ -217,32 +244,33 @@ class Daemon:
         except LassoError as e:
             return {"ok": False, "error": str(e)}
         except asyncio.CancelledError:
-            if cmd == "connect" and self.state is State.IDLE:
-                return {"ok": False, "error": "cancelled"}
-            raise
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            return {"ok": False, "error": "cancelled"}  # the connect/pair op was cancelled, not us
         return {"ok": True, "state": str(self.state), "detail": self.detail}
 
     # -- connect / disconnect --
 
     async def connect(self, auto: bool = False) -> None:
+        if self._suspended:
+            raise LassoError("suspending or resuming, try again in a moment")
         if self.state is State.ACTIVE:
             return
-        if self._connect_task is None or self._connect_task.done():
-            if self.state is not State.IDLE:
-                raise LassoError(f"busy: {self.state}")
-            self._connect_task = asyncio.ensure_future(self._connect(auto))
-        await asyncio.shield(self._connect_task)
+        if self.state not in (State.REQUESTING, State.JOINING) or not self._op or self._op.done():
+            if not self.config.phone_address:
+                raise LassoError("not paired yet: run `lasso pair <address>` (see `lasso scan`)")
+            self._start_op(State.REQUESTING, "", lambda gen: self._connect(auto, gen))
+        await asyncio.shield(self._op)
 
-    async def _connect(self, auto: bool) -> None:
+    async def _connect(self, auto: bool, gen: int) -> None:
+        """Runs as `_op`; disconnect and sleep cancel it, so no other lifecycle step interleaves."""
         address = self.config.phone_address
-        if not address:
-            raise LassoError("not paired yet: run `lasso pair <address>` (see `lasso scan`)")
         phone = self.config.phone_name
         self.notifier.new_attempt()
-        await self._notify(f"No network, connecting to {phone}… retry in a moment" if auto
-                           else f"Connecting to {phone}…")
-        self._set(State.REQUESTING)
         try:
+            await self._notify(f"No network, connecting to {phone}… retry in a moment" if auto
+                               else f"Connecting to {phone}…")
             self.session = await self.ble.request(address)
             self._set(State.JOINING, self.session.ssid)
             self.gateway = await self.nm.join(self.session.ssid, self.session.psk, self.session.sec)
@@ -250,8 +278,9 @@ class Daemon:
             if not isinstance(e, LassoError):
                 log.exception("unexpected error while connecting")
                 e = LassoError(f"{type(e).__name__}: {e}")
-            # Tell the phone to stop its hotspot (if it started one), undo our profile.
-            await self._teardown()
+            # Tell the phone to stop its hotspot (if it started one), undo our profile. Shielded so a
+            # disconnect arriving now does not cut the RELEASE short (it already took the session).
+            await asyncio.shield(self._teardown())
             if auto:
                 self.backoff.failed(self.clock())
             self._set(State.IDLE, str(e))
@@ -259,22 +288,20 @@ class Daemon:
             raise e
         self.backoff.reset()
         self._set(State.ACTIVE, f"via {phone}, gateway {self.gateway}")
-        self._hb_task = asyncio.ensure_future(self._heartbeat(self.session, self.gateway))
+        self._hb_task = asyncio.ensure_future(self._heartbeat(self.session, self.gateway, gen))
         await self._notify(f"Connected via {phone}")
 
     async def disconnect(self) -> None:
         was_busy = self.state is not State.IDLE
-        task = self._connect_task
-        if task and not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError, LassoError):
-                await task
-        await self._teardown()
-        self._set(State.IDLE, "disconnected")
+        self._gen += 1  # also stops a pending resume reconnect
+        await self._cancel_op()
+        async with self._lock:
+            await self._teardown()
+            self._set(State.IDLE, "disconnected")
         if was_busy:
             await self._notify(f"Disconnected from {self.config.phone_name}")
 
-    async def _teardown(self, *, udp: bool = True, ble: bool = True) -> None:
+    async def _teardown(self, *, udp: bool = True, ble: bool = True, ble_timeout: float | None = None) -> None:
         """Stop the heartbeat, RELEASE the session, take the `lasso` connection down."""
         hb, self._hb_task = self._hb_task, None
         if hb and hb is not asyncio.current_task():
@@ -288,20 +315,24 @@ class Daemon:
             if udp and gateway:
                 await self.udp_send(gateway, session.port, protocol.encode("RELEASE", sid=session.sid))
             if ble and self.config.phone_address:
-                jobs.append(self.ble.release(self.config.phone_address, session.sid))
+                jobs.append(asyncio.wait_for(self.ble.release(self.config.phone_address, session.sid), ble_timeout))
         await asyncio.gather(*jobs, return_exceptions=True)
 
     # -- heartbeat --
 
-    async def _heartbeat(self, session: protocol.Ready, gateway: str) -> None:
+    async def _heartbeat(self, session: protocol.Ready, gateway: str, gen: int) -> None:
         await Heartbeat(self.make_ping(gateway, session.port, session.sid), self.hb_interval).run()
         # run() only returns when the session is dead.
-        log.warning("heartbeat lost")
+        async with self._lock:
+            if gen != self._gen:
+                return
+            self._gen += 1
+            log.warning("heartbeat lost")
+            await self._teardown(udp=False, ble=False)
+            self.backoff.failed(self.clock())
+            self._hb_lost, self._hb_lost_net = True, None  # no automatic retry until the network changes
+            self._set(State.IDLE, "heartbeat lost")
         await self._notify("Hotspot connection lost")
-        await self._teardown(udp=False, ble=False)
-        # Same offline period: demand may retry only after the backoff.
-        self.backoff.failed(self.clock())
-        self._set(State.IDLE, "heartbeat lost")
 
     # -- pairing --
 
@@ -309,20 +340,22 @@ class Daemon:
         address = address or self.config.phone_address
         if not address:
             raise LassoError("pairing needs a device: lasso pair <address> (see `lasso scan`)")
-        if self.state is not State.IDLE:
-            raise LassoError(f"busy: {self.state}")
-        self._set(State.PAIRING, address)
+        self._start_op(State.PAIRING, address, lambda _gen: self._pair(address))
+        await asyncio.shield(self._op)
+
+    async def _pair(self, address: str) -> None:
+        """Runs as `_op`; a disconnect cancels it and owns the state from then on."""
         self.notifier.new_attempt()
-        await self._notify("Pairing: open the pairing screen in the Lasso app and confirm the numeric code")
         try:
+            await self._notify("Pairing: open the pairing screen in the Lasso app and confirm the numeric code")
             name = await self.ble.pair(address, socket.gethostname())
-        except LassoError as e:
+        except Exception as e:  # noqa: BLE001 - not cancellation: we still own the state
+            self._set(State.IDLE, str(e))
             await self._notify(str(e))
             raise
-        finally:
-            self._set(State.IDLE)
         config_mod.save_phone(address, name)
         self.config.phone_address, self.config.phone_name = address, name
+        self._set(State.IDLE, f"paired with {name}")
         await self._notify(f"Paired with {name}")
 
     # -- network observation and auto-connect --
@@ -333,23 +366,38 @@ class Daemon:
             self.read_active(self.config.idle_minutes))
         return Observation(connectivity, eth, known_connections(visible, saved), active)
 
+    def _note(self, obs: Observation, now: float, lasso_active: bool) -> None:
+        """Feed an observation to the offline tracker and the heartbeat-loss latch."""
+        if self.tracker.update(obs.connectivity, now, lasso_active):
+            self.backoff.reset()
+            self._hb_lost = False  # a real network came back
+        if self._hb_lost:
+            net = (tuple(obs.known_wifi), obs.ethernet_up)
+            if self._hb_lost_net is None:
+                self._hb_lost_net = net
+            elif net != self._hb_lost_net:
+                self._hb_lost = False  # known Wi-Fi or ethernet changed
+
     async def poll_once(self) -> None:
         obs = await self.observe()
-        now = self.clock()
         active = self.state is State.ACTIVE
-        if self.tracker.update(obs.connectivity, now, active):
-            self.backoff.reset()
+        self._note(obs, self.clock(), active)
         if active and (obs.known_wifi or obs.ethernet_up):
             await self._switch_to_known(obs)
 
     async def _switch_to_known(self, obs: Observation) -> None:
         """A better network showed up while on the hotspot: join it and release the phone."""
+        gen = self._gen
         if obs.known_wifi and not obs.ethernet_up:
             log.info("known Wi-Fi %s in range, leaving the hotspot", obs.known_wifi[0])
             if not await self.nm.up(obs.known_wifi[0]):
                 return
-        await self._teardown()
-        self._set(State.IDLE, "switched to a known network")
+        async with self._lock:
+            if gen != self._gen or self.state is not State.ACTIVE:
+                return  # the session we meant to leave is gone already
+            self._gen += 1
+            await self._teardown()
+            self._set(State.IDLE, "switched to a known network")
         await self._notify(f"Switched to a known network, released {self.config.phone_name}")
 
     async def watch(self) -> None:
@@ -365,12 +413,15 @@ class Daemon:
         self._spawn(self._demand(reason))
 
     async def _demand(self, reason: str) -> None:
-        if not self.config.auto_connect or not self.config.phone_address or self.state is not State.IDLE:
+        if (not self.config.auto_connect or not self.config.phone_address or self.state is not State.IDLE
+                or self._suspended):
             return
         obs = await self.observe()
         now = self.clock()
-        self.tracker.update(obs.connectivity, now, False)
+        self._note(obs, now, False)
         why = auto_connect_block(obs, self.tracker, self.backoff, now, self.config.offline_grace_s, self.state)
+        if not why and self._hb_lost:
+            why = "heartbeat lost, waiting for `lasso connect` or a network change"
         if why:
             log.debug("demand %s ignored: %s", reason, why)
             return
@@ -400,13 +451,19 @@ class Daemon:
 
     async def _take_inhibitor(self, bus: Any) -> None:
         """A delay lock gives us the few seconds logind allows to send RELEASE before sleeping."""
-        from dbus_fast import Message
+        from dbus_fast import Message, MessageType
         try:
             reply = await bus.call(Message(
                 destination="org.freedesktop.login1", path="/org/freedesktop/login1",
                 interface="org.freedesktop.login1.Manager", member="Inhibit", signature="ssss",
                 body=["sleep", "Lasso", "Release the phone hotspot before sleep", "delay"]))
-            self._inhibit_fd = reply.body[0]
+            if reply.message_type is not MessageType.METHOD_RETURN:
+                raise RuntimeError(f"{reply.error_name}: {reply.body}")
+            # With fd passing, the body holds an index into unix_fds, not the descriptor itself.
+            index = reply.body[0] if len(reply.body) == 1 else None
+            if not isinstance(index, int) or not 0 <= index < len(reply.unix_fds):
+                raise RuntimeError(f"unexpected Inhibit reply {reply.body!r}")
+            self._inhibit_fd = reply.unix_fds[index]
         except Exception as e:  # noqa: BLE001
             log.warning("no sleep inhibitor: %s", e)
 
@@ -418,23 +475,29 @@ class Daemon:
 
     async def _on_sleep(self, sleeping: bool, bus: Any) -> None:
         if sleeping:
-            self._was_active_before_sleep = self.state is State.ACTIVE
+            self._suspended = True  # blocks connect, pair and demand until resume
+            self._gen += 1
             try:
-                task = self._connect_task
-                if task and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError, LassoError):
-                        await task
-                # UDP RELEASE only: BLE would eat into logind's delay budget.
-                await self._teardown(ble=False)
-                self._set(State.IDLE, "sleeping")
+                was_active = self.state is State.ACTIVE
+                await self._cancel_op()
+                async with self._lock:
+                    self._was_active_before_sleep = was_active
+                    # With a gateway, UDP RELEASE suffices. Still joining (credentials, no gateway): BLE is
+                    # the only way to reach the phone, bounded to fit logind's delay budget.
+                    joining = self.session is not None and not self.gateway
+                    await self._teardown(ble=joining, ble_timeout=SLEEP_BLE_RELEASE_S)
+                    self._set(State.IDLE, "sleeping")
             finally:
                 self._drop_inhibitor()
             return
+        self._suspended = False
         await self._take_inhibitor(bus)
         if self._was_active_before_sleep:
             self._was_active_before_sleep = False
+            gen = self._gen
             await asyncio.sleep(RESUME_DELAY_S)
+            if gen != self._gen:
+                return  # a disconnect (or another sleep) happened meanwhile and wins
             with suppress(LassoError):
                 await self.connect()
 

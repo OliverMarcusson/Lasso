@@ -28,3 +28,15 @@ def test_save_phone_creates_file(tmp_path):
     p = tmp_path / "sub" / "c.toml"
     config.save_phone("AA:BB", "P", p)
     assert config.load(p).phone_address == "AA:BB"
+
+
+def test_save_phone_writes_valid_toml_for_any_name(tmp_path):
+    import tomllib
+    p = tmp_path / "c.toml"
+    for name in ["Phone 😀", 'Ann\'s "Pixel" \\ C:\\x', "tab\there\nnew\x7f\x00", "Ünïcødé ✓"]:
+        config.save_phone("AA:BB", name, p)
+        assert tomllib.loads(p.read_text(encoding="utf-8"))["phone_name"] == name
+        assert config.load(p).phone_name == name
+    assert "😀" not in p.read_text(encoding="utf-8")  # last name replaced the first
+    config.save_phone("AA:BB", "Phone 😀", p)
+    assert '"Phone 😀"' in p.read_text(encoding="utf-8")  # emitted directly, not \ud83d escapes

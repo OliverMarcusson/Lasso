@@ -61,6 +61,8 @@ def encode(t: str, **fields: Any) -> bytes:
 
 def decode(data: bytes) -> dict[str, Any] | None:
     """Parse a message. Returns None for anything that is not a v1 message; unknown fields are kept."""
+    if len(data) > MAX_MESSAGE:
+        return None
     try:
         msg = json.loads(data.decode())
     except (UnicodeDecodeError, ValueError):

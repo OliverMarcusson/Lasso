@@ -54,3 +54,10 @@ def test_ready_missing_field():
 def test_phone_error_text():
     assert "Shizuku" in protocol.PhoneError("NO_PRIVILEGE").text
     assert protocol.PhoneError("WEIRD").text == "WEIRD"
+
+
+def test_decode_rejects_oversize():
+    raw = b'{"t":"STARTING","v":1,"x":"' + b"x" * 200 + b'"}'
+    assert protocol.decode(raw) is None
+    ok = b'{"t":"STARTING","v":1,"x":"' + b"x" * (protocol.MAX_MESSAGE - 30) + b'"}'
+    assert len(ok) <= protocol.MAX_MESSAGE and protocol.decode(ok) is not None
