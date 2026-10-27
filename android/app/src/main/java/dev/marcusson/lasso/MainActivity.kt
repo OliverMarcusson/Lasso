@@ -3,6 +3,7 @@ package dev.marcusson.lasso
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.View
@@ -11,10 +12,14 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import dev.marcusson.lasso.hotspot.HotspotConfig
+import dev.marcusson.lasso.hotspot.HotspotException
+import dev.marcusson.lasso.hotspot.Security
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
@@ -61,6 +66,12 @@ class MainActivity : Activity() {
             status, shizukuStatus, shizukuButton, pairButton,
             TextView(this).apply { text = "Paired laptops"; setPadding(0, 48, 0, 0) }, pairedList,
         ).forEach { root.addView(it) }
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            root.addView(Button(this).apply {
+                text = "Test hotspot (debug, 60 s)"
+                setOnClickListener { testHotspot() }
+            })
+        }
         setContentView(root)
 
         if (missingPermissions().isNotEmpty()) requestPermissions(missingPermissions(), REQ_PERMISSIONS) else startLasso()
@@ -117,6 +128,26 @@ class MainActivity : Activity() {
             1 -> Shizuku.requestPermission(REQ_SHIZUKU)
         }
         render()
+    }
+
+    /** Debug only: bypasses the session machine; watch `adb logcat -s LassoHotspot`. */
+    private fun testHotspot() {
+        val hotspot = app.hotspotController
+        app.scope.launch {
+            val toast = { msg: String -> Toast.makeText(app, msg, Toast.LENGTH_LONG).show() }
+            try {
+                val info = hotspot.start(HotspotConfig("Lasso-Test", "lasso-test-1234", Security.WPA3_TRANSITION))
+                toast("Hotspot up: ${info.ssid}, stopping in 60 s")
+                delay(60_000)
+            } catch (e: HotspotException) {
+                toast("Hotspot failed: ${e.code} ${e.message}")
+            } catch (e: Exception) {
+                toast("Hotspot failed: $e")
+            } finally {
+                runCatching { hotspot.stop() }
+                toast("Test hotspot stopped")
+            }
+        }
     }
 
     private fun render() {
